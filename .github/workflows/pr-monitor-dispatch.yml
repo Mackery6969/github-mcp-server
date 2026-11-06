@@ -1,0 +1,107 @@
+name: PR Monitor — Dispatch
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, ready_for_review, reopened]
+  pull_request_review:
+    types: [submitted]
+  check_run:
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR to review (omit for repo-wide check)"
+        required: false
+        type: number
+
+permissions:
+  pull-requests: read
+  checks: read
+  copilot-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    env:
+      PR_NUMBER: ${{ github.event.inputs.pr_number || '' }}
+      REPO_OWNER: ${{ github.repository_owner }}
+      REPO_NAME: ${{ github.event.repository.name }}
+    steps:
+      - name: Collect PR data and review
+        id: check
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const owner = process.env.REPO_OWNER;
+            const repo = process.env.REPO_NAME;
+            const prNumber = Number(process.env.PR_NUMBER || 0);
+
+            let prs = [];
+            if (prNumber > 0) {
+              const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+              prs = [pr];
+            } else {
+              // Collect all open PRs from the event trigger
+              const pr = context.payload.pull_request;
+              if (pr) prs = [pr];
+              else {
+                const pages = await github.paginate.iterator(github.rest.pulls.list, {
+                  owner, repo, state: 'open', sort: 'updated', direction: 'desc', per_page: 100
+                });
+                for await (const page of pages) prs = prs.concat(page.data);
+              }
+            }
+
+            const results = [];
+            for (const pr of prs) {
+              // CI status
+              let ciStatus = 'unknown';
+              try {
+                const { data: checks } = await github.rest.checks.listForRef({
+                  owner, repo, ref: pr.head.sha, per_page: 20
+                });
+                const statuses = checks.check_runs?.map(c => c.conclusion) || [];
+                if (statuses.includes('failure')) ciStatus = 'failing';
+                else if (statuses.some(s => s === 'success')) ciStatus = 'passing';
+                else if (statuses.length > 0) ciStatus = 'pending';
+              } catch {}
+
+              // Reviews
+              const { data: reviews } = await github.rest.pulls.listReviews({
+                owner, repo, pull_number: pr.number
+              });
+              const approved = reviews.filter(r => r.state === 'APPROVED');
+              const changesRequested = reviews.filter(r => r.state === 'CHANGES_REQUESTED');
+
+              // What needs attention?
+              const needsAttention = [];
+              if (ciStatus === 'failing') needsAttention.push('CI failing');
+              if (changesRequested.length > 0 && !approved.length) needsAttention.push(`${changesRequested.length} change request(s)`);
+              if (pr.review_comments > 5) needsAttention.push(`${pr.review_comments} review comments`);
+
+              // Was this event-driven? What triggered it?
+              let trigger = 'schedule';
+              if (context.eventName === 'pull_request_target') trigger = 'pr_' + context.payload.action;
+              else if (context.eventName === 'pull_request_review') trigger = 'review_' + context.payload.review?.state;
+              else if (context.eventName === 'check_run') trigger = 'check_' + context.payload.check_run?.conclusion;
+
+              results.push({
+                number: pr.number,
+                title: pr.title,
+                ci_status: ciStatus,
+                approved: approved.length > 0,
+                changes_requested: changesRequested.length,
+                review_comments: pr.review_comments,
+                needs_attention: needsAttention.length > 0,
+                reasons: needsAttention,
+                trigger,
+                updated_at: pr.updated_at
+              });
+            }
+
+            core.setOutput('summary', JSON.stringify(results));
+            core.setOutput('count', results.length);
+
+      - name: Review PRs
+        env:
+          SUMMARY: ${{ steps.check.outputs.summary }}

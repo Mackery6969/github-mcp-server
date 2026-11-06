@@ -1,0 +1,10 @@
+name: github-app-webhook
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+[vars]
+# Webhook secret — must match what you configure in GitHub App settings
+WEBHOOK_SECRET = "change-me-to-a-random-string"
+
+# GitHub PAT for dispatching workflows (can be a GitHub App installation token)
+GITHUB_TOKEN = ""
