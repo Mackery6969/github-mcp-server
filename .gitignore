@@ -21,6 +21,10 @@ bin/
 /mcpcurl
 /e2e.test
 
+# Environment secrets
+.env
+*.pem
+
 .history
 conformance-report/
 

@@ -1,0 +1,139 @@
+// GitHub MCP Server — OpenCode configuration template
+// Copy this to your OpenCode config (~/.config/opencode/opencode.json)
+// and fill in the credentials for your preferred auth method.
+//
+// Supported auth methods (pick ONE):
+//   1. GitHub App (recommended for bots/agents)
+//   2. Personal Access Token (PAT)
+//   3. OAuth (interactive browser login)
+//
+// IMPORTANT: Tools are auto-filtered by the server based on granted permissions.
+// Your GitHub App has all scopes → all tools available.
+// If you restrict scopes later, tools needing missing scopes are hidden.
+//
+// Scope → tool mappings (from pkg/scopes/scopes.go):
+//   repo              → PRs, issues, code, commits, branches, deployments
+//   security_events   → code scanning alerts, dependabot alerts
+//   workflow          → Actions workflows, runs, jobs, artifacts
+//   notifications     → list, search, mark, dismiss notifications
+//   codespace         → codespace operations
+//   read:org          → teams, org membership, org projects
+//   write:org         → manage org memberships and teams
+//   admin:enterprise  → enterprise settings, custom properties
+//   gist              → create, update, delete gists
+//   project           → full control of projects
+//   codeset           → codespace admin
+//   public_repo       → public repos only (subset of repo)
+
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  "mcp": {
+    // ── Method 1: GitHub App (non-interactive, no browser) ─────────
+    // Best for agents, CI, and bot use. Your App has all scopes.
+    //
+    // Required env vars:
+    //   GITHUB_APP_ID            — numeric App ID
+    //   GITHUB_APP_INSTALLATION_ID — installation ID
+    //   GITHUB_APP_PRIVATE_KEY_PATH — path to the RSA/PKCS PEM file
+
+    "github-app": {
+      "type": "local",
+      "command": [
+        "docker", "run", "-i", "--rm",
+        "--mount", "type=bind,source=${GITHUB_APP_PRIVATE_KEY_PATH},destination=/app/key.pem,read-only",
+        "-e", "GITHUB_APP_ID",
+        "-e", "GITHUB_APP_INSTALLATION_ID",
+        "-e", "GITHUB_APP_PRIVATE_KEY_PATH",
+        "-e", "GITHUB_PERSONAL_ACCESS_TOKEN"
+      ],
+      "args": ["stdio", "--app-private-key-path", "/app/key.pem"],
+      "enabled": true,
+      "environment": {
+        "GITHUB_APP_PRIVATE_KEY_PATH": "/app/key.pem"
+      },
+      "note": "Fill in env vars in your shell. GITHUB_PERSONAL_ACCESS_TOKEN is optional (fallback for repos not installed on the app)."
+    },
+
+    // ── Method 2: Personal Access Token (simplest) ─────────────────
+
+    "github-pat": {
+      "type": "local",
+      "command": [
+        "docker", "run", "-i", "--rm",
+        "-e", "GITHUB_PERSONAL_ACCESS_TOKEN"
+      ],
+      "enabled": false,
+      "environment": {}
+    },
+
+    // ── Method 3: OAuth (interactive, browser login) ───────────────
+
+    "github-oauth": {
+      "type": "local",
+      "command": [
+        "docker", "run", "-i", "--rm",
+        "-p", "127.0.0.1:8085:8085",
+        "-e", "GITHUB_OAUTH_CALLBACK_PORT"
+      ],
+      "enabled": false,
+      "environment": {
+        "GITHUB_OAUTH_CALLBACK_PORT": "8085"
+      }
+    },
+
+    // ── Remote server (GitHub-hosted, no Docker needed) ────────────
+    "github-remote": {
+      "type": "remote",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "enabled": false,
+      "oauth": false,
+      "headers": {}
+    }
+  },
+
+  // ── Tool filtering (optional — server already filters by scope) ──
+  // The server hides tools automatically based on granted permissions.
+  // Use these settings only if you want extra filtering beyond scopes.
+  //
+  // "tools": {
+  //   "github_*": false
+  // },
+  // "agent": {
+  //   "default": {
+  //     "tools": { "github_*": true }
+  //   }
+  // },
+
+  // ── Toolset filtering (recommended to reduce context size) ──────
+  // Set toolsets via env var or Docker args to limit exposed tools.
+  //
+  // Environment: GITHUB_TOOLSETS="repos,issues,pull_requests,actions,code_security"
+  // Docker args:  --toolsets repos,issues,pull_requests,actions,code_security
+  //
+  // Default toolset (when none specified): context, repos, issues, pull_requests, users
+  //
+  // All available toolsets:
+  //   context        — get_me, get_teams, get_team_members (recommended)
+  //   repos          — files, commits, trees, branches, releases
+  //   issues         — list, create, update, comment, labels
+  //   pull_requests  — list, create, review, merge, check
+  //   users          — user profile, followers, following
+  //   actions        — workflows, runs, jobs, artifacts, logs
+  //   code_security  — code scanning alerts, dependabot alerts
+  //   code_quality   — code quality findings
+  //   copilot        — assign copilot, request review
+  //   copilot_issue_intents — assign copilot with intent
+  //   dependabot     — dependabot alerts
+  //   discussions    — discussions and comments
+  //   gists          — create, update, delete gists
+  //   git            — low-level Git operations
+  //   governance     — rulesets, custom properties
+  //   labels         — label management
+  //   notifications  — list, search, mark notifications
+  //   orgs           — organization operations
+  //   projects       — project boards
+  //   secret_protection  — secret scanning
+  //   security_advisories  — security advisories
+  //   stargazers     — stargazers, watchers
+}

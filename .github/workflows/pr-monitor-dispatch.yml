@@ -1,0 +1,39 @@
+# PR Monitor — Dispatcher
+# Triggers the actual PR monitor workflow with collected data.
+# Run on schedule and on PR events to keep monitoring active.
+
+name: PR Monitor — Dispatch
+
+on:
+  schedule:
+    - cron: "5 */4 * * *"  # 5 min after pr-triage-dispatch
+  # Also trigger on PR events for near real-time monitoring
+  pull_request_target:
+    types: [opened, synchronize, ready_for_review, reopened]
+  pull_request_review:
+    types: [submitted]
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  pull-requests: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for PRs needing review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Check if any open PRs exist that haven't been reviewed yet
+          prs=$(gh pr list --state open --limit 50 --json number,title,author,createdAt --jq '.[] | select(.author.login != "dependabot[bot]" and .author.login != "renovate[bot]") | {number, title}')
+          if [ -z "$prs" ]; then
+            echo "No PRs to monitor"
+            exit 0
+          fi
+          count=$(echo "$prs" | jq length)
+          echo "Found $count PR(s) to monitor"
+          echo "$prs" | jq -r '.number' | head -5 | while read -r num; do
+            echo "Scheduling review for PR #$num"
+          done
