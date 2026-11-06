@@ -1,18 +1,13 @@
 // GitHub App Webhook → Cloudflare Worker
 //
-// Receives GitHub App webhook events (PR opened, reviewed, CI updated, etc.)
-// and fans them out to your PR monitoring system.
+// Receives webhook events from your GitHub App and dispatches the
+// PR monitor workflow for real-time, event-driven monitoring.
 //
-// Deploy to Cloudflare Workers:
-//   wrangler deploy
-//
-// Then configure your GitHub App webhook:
-//   Payload URL: https://your-worker-domain.workers.dev/webhook
-//   Secret: same value as WEBHOOK_SECRET in wrangler.toml
+// Deploy: wrangler deploy
+// Then set your GitHub App webhook to: https://your-worker.workers.dev/webhook
 
 export default {
-  async fetch(request, env, ctx) {
-    // Only accept POST at /webhook
+  async fetch(request, env) {
     if (request.method !== 'POST') {
       return new Response('Method not allowed', { status: 405 });
     }
@@ -22,7 +17,7 @@ export default {
       return new Response('Not found', { status: 404 });
     }
 
-    // ── Verify webhook signature ──────────────────────────────────
+    // ── Verify signature ──────────────────────────────────────────
     const signature = request.headers.get('x-hub-signature-256');
     if (!signature) {
       return new Response('Missing signature', { status: 401 });
@@ -34,117 +29,59 @@ export default {
       return new Response('Invalid signature', { status: 403 });
     }
 
-    // ── Parse event ──────────────────────────────────────────────
     const event = JSON.parse(payload);
-    const action = request.headers.get('x-github-event') || 'ping';
+    const action = request.headers.get('X-GitHub-Event') || event.action;
 
-    // Handle ping from GitHub
+    // GitHub pings the webhook URL on setup — just acknowledge
     if (action === 'ping') {
-      return new Response(JSON.stringify({ message: 'Webhook configured successfully' }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
     }
 
-    // ── Log the event (replace with your dispatch logic) ─────────
-    console.log(`[${action}]`, JSON.stringify(event, null, 2));
+    // ── Events we care about ──────────────────────────────────────
+    // Only dispatch for events that should trigger a PR review
+    const shouldDispatch = (
+      (action === 'pull_request' && ['opened', 'synchronize', 'ready_for_review', 'reopened'].includes(event.action)) ||
+      (action === 'pull_request_review' && ['APPROVED', 'CHANGES_REQUESTED'].includes(event.review?.state)) ||
+      (action === 'check_run' && ['success', 'failure'].includes(event.check_run?.conclusion))
+    );
 
-    // ── Fan-out: trigger PR monitor workflow ──────────────────────
-    if (action === 'pull_request') {
-      const prAction = event.action;
-      const prNumber = event.pull_request?.number;
-      const repo = event.repository;
+    if (!shouldDispatch) {
+      return new Response('OK', { status: 200 }); // Silently skip irrelevant events
+    }
 
-      if (prNumber && ['opened', 'synchronize', 'ready_for_review', 'reopened'].includes(prAction)) {
-        // Dispatch the PR monitor workflow for this specific PR
-        try {
-          const resp = await fetch(
-            `https://api.github.com/repos/${repo.full_name}/actions/workflows/pr-monitor.yml/dispatches`,
-            {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${env.GITHUB_TOKEN}`,
-                'Accept': 'application/vnd.github.v3+json',
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                ref: repo.default_branch,
-                inputs: {
-                  pr_number: String(prNumber),
-                  repo_owner: repo.owner?.login || repo.owner?.name,
-                  repo_name: repo.name,
-                },
-              }),
-            }
-          );
+    // ── Dispatch PR monitor workflow ──────────────────────────────
+    const repo = event.repository;
+    const prNumber = event.pull_request?.number;
 
-          if (!resp.ok) {
-            console.error('Failed to dispatch PR monitor:', await resp.text());
-          }
-        } catch (e) {
-          console.error('Error dispatching PR monitor:', e.message);
+    try {
+      await fetch(
+        `https://api.github.com/repos/${repo.full_name}/actions/workflows/pr-monitor-dispatch.yml/dispatches`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${env.GITHUB_TOKEN}`,
+            'Accept': 'application/vnd.github.v3+json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            ref: repo.default_branch,
+            inputs: { pr_number: String(prNumber) },
+          }),
         }
-      }
-    }
-
-    // Handle PR review events
-    if (action === 'pull_request_review') {
-      const prNumber = event.pull_request?.number;
-      const repo = event.repository;
-      const reviewState = event.review?.state;
-
-      if (prNumber && ['CHANGES_REQUESTED', 'APPROVED'].includes(reviewState)) {
-        try {
-          await fetch(
-            `https://api.github.com/repos/${repo.full_name}/actions/workflows/pr-monitor.yml/dispatches`,
-            {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${env.GITHUB_TOKEN}`,
-                'Accept': 'application/vnd.github.v3+json',
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                ref: repo.default_branch,
-                inputs: {
-                  pr_number: String(prNumber),
-                  repo_owner: repo.owner?.login || repo.owner?.name,
-                  repo_name: repo.name,
-                },
-              }),
-            }
-          );
-        } catch (e) {
-          console.error('Error dispatching PR monitor after review:', e.message);
-        }
-      }
-    }
-
-    // Handle check run events (CI status changes)
-    if (action === 'check_run') {
-      const checkConclusion = event.check_run?.conclusion;
-      const repo = event.repository;
-
-      if (['failure', 'success'].includes(checkConclusion)) {
-        // Could trigger PR monitor or notify via email/slack
-        console.log(`CI check ${checkConclusion}: ${event.check_run.name}`);
-      }
+      );
+    } catch (e) {
+      console.error('Dispatch failed:', e.message);
     }
 
     return new Response('OK', { status: 200 });
   },
 };
 
-/**
- * Verify HMAC signature of webhook payload.
- */
 async function verifySignature(payload, signature, secret) {
   const hash = await crypto.subtle.digest(
-    'SHA-256',
-    new TextEncoder().encode(secret + payload)
+    'SHA-256', new TextEncoder().encode(secret + payload)
   );
-  const hashHex = Array.from(new Uint8Array(hash))
-    .map(b => b.toString(16).padStart(2, '0'))
-    .join('');
-  return `sha256=${hashHex}` === signature;
+  const hex = Array.from(new Uint8Array(hash))
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+  return `sha256=${hex}` === signature;
 }
